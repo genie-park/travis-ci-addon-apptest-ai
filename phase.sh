@@ -71,13 +71,14 @@ serviceHost=https://api.apptest.ai
 
 # store the whole response with the status at the and
 apk_file_d='apk_file=@'\"${binary_path}\" 
-data_d='data={"pid":'${project_id}',"test_set_name":"Bitrise_Test"}'
+data_d='data={"pid":'${project_id}',"test_set_name":"CircleCI"}'
 testRunUrl=${serviceHost}/test_set/queuing?access_key=${access_key}
 
-echo ${apk_file_d}
-echo ${testRunUrl}
-echo ${data_d}
-HTTP_RESPONSE=$(curl --write-out "HTTPSTATUS:%{http_code}" -X POST -F $apk_file_d -F $data_d ${testRunUrl})
+#echo ${apk_file_d}
+#echo ${testRunUrl}
+#echo ${data_d}
+HTTP_RESPONSE=$(curl --silent --write-out "HTTPSTATUS:%{http_code}" -X POST -F $apk_file_d -F $data_d ${testRunUrl})
+#echo ${HTTP_RESPONSE}
 
 # extract the body
 HTTP_BODY=$(echo ${HTTP_RESPONSE} | sed -e 's/HTTPSTATUS\:.*//g')
@@ -135,16 +136,13 @@ while [ ! "$TEST_RUN_RESULT" == "true" ] && [ "$waiting_for_test_results" == "tr
         break
     fi
    
-    echo_details "Waiting for Test Run(${tsid}) completed"
+    echo_details "Waiting for Test Run(Test run id : ${tsid}) completed"
     sleep 20s
 done
 
 if [ "$waiting_for_test_results" == "true" ]; then 
 	echo '========================================='
 	echo $(echo $RESULT_DATA | jq -r .result_json)
-	TMP_DIR=$(mktemp -d)
-	touch ${TMP_DIR}/apptest_results.json
-	echo $(echo $RESULT_DATA | jq -r .result_json > ${TMP_DIR}/apptest_results.json)
-	APPTEST_AI_TEST_RESULT=TMP_DIR/apptest_results.json
-	echo_details 'Test completed and saved ${APPTEST_AI_TEST_RESULT}'
+	echo $(echo $RESULT_DATA | jq -r .result_json > apptest_results.json)
+	echo_details "Test completed and saved (${APPTEST_AI_TEST_RESULT})"
 fi
