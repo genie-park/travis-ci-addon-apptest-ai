@@ -1,148 +1,99 @@
 #!/usr/bin/env bash
 set -e
-#=======================================
-# Functions
-#=======================================
-RESTORE='\033[0m'
-RED='\033[00;31m'
-YELLOW='\033[00;33m'
-BLUE='\033[00;34m'
-GREEN='\033[00;32m'
+	   access_key=${APPTEST_AI_ACCESS_KEY}
 
-function color_echo {
-    color=$1
-    msg=$2
-    echo -e "${color}${msg}${RESTORE}"
-}
+           if [ -z "${binary_path}" ]; then
+             echo "Test app's binary path is needed"
+             exit 255
+           fi
 
-function echo_fail {
-    msg=$1
-    echo
-    color_echo "${RED}" "${msg}"
-    exit 1
-}
+           if [ -z "${project_id}" ]; then
+             echo "Apptest.ai project id is needed"
+             exit 254
+           fi
 
-function echo_warn {
-    msg=$1
-    color_echo "${YELLOW}" "${msg}"
-}
+           if [ -z "${access_key}" ]; then
+             echo "apptest ai access key should be set as APPTEST_AI_ACCESS_KEY"
+             exit 253
+           fi
 
-function echo_info {
-    msg=$1
-    echo
-    color_echo "${BLUE}" "${msg}"
-}
+           if [ -z "${waiting_for_test_results}" ]; then
+              waiting_for_test_results="true"
+           fi
+           
+           if [ -z "${test_result_path}" ]; then
+              test_result_path="test-results"
+           fi
 
-function echo_details {
-    msg=$1
-    echo "  ${msg}"
-}
+           if [ ! -f "${binary_path}" ]; then
+             echo "Can't find binary file at ${binary_path}"
+             exit 252
+           fi
 
-function echo_done {
-    msg=$1
-    color_echo "${GREEN}" "  ${msg}"
-}
+           serviceHost=https://api.apptest.ai
+           apk_file_d='apk_file=@'\"${binary_path}\"
+           data_d='data={"pid":'${project_id}',"test_set_name":"circleci"}'
+           testRunUrl=${serviceHost}/openapi/v1/test/run
+           HTTP_RESPONSE=$(curl --silent --write-out "HTTPSTATUS:%{http_code}" -F ${apk_file_d} -F ${data_d} -u ${access_key} ${testRunUrl})
 
+           HTTP_BODY=$(echo "${HTTP_RESPONSE}" | sed -e 's/HTTPSTATUS\:.*//g')
+           HTTP_STATUS=$(echo "${HTTP_RESPONSE}" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
-#=======================================
-# Main
-#=======================================
+           if [ ! ${HTTP_STATUS} -eq 200  ]; then
+             echo "Error [HTTP status: ${HTTP_STATUS}]"
+             exit 251
+           fi
 
-if [ -z "$binary_path" ]; then
-	echo "binary path is needed"
-	exit 1
-fi
+           create_test_result=$(echo "${HTTP_BODY}" | jq -r .result)
+           if [ ${create_test_result} == 'fail' ]; then
+             echo "apptest.ai Test Run Fail :" $(echo ${HTTP_BODY} | jq -r .reason)
+             exit 250
+           fi
 
-if [ -z "$project_id" ]; then 
-	echo "project id is needed"
-	exit 1
-fi
+           tsid=$(echo "${HTTP_BODY}" | jq -r .data.tsid)
+           echo 'Your test request is accepted - Test Run id : '${tsid}
 
-if [ -z "$access_key" ]; then
-	echo "apptest ai access key is needed"
-	exit 1
-fi
+           start_time=$(date +%s)
+           testCompleteCheckUrl=${serviceHost}/openapi/v1/project/${project_id}/testset/${tsid}/result/all
 
-if [ -z "$waiting_for_test_results" ]; then
-	waiting_for_test_results=true
-fi
+           TEST_RUN_RESULT=false
+           while ! ${TEST_RUN_RESULT} && ${waiting_for_test_results}; do
+             HTTP_RESPONSE=$(curl --silent --write-out "HTTPSTATUS:%{http_code}" -u ${access_key} ${testCompleteCheckUrl})
+             HTTP_BODY=$(echo "${HTTP_RESPONSE}" | sed -e 's/HTTPSTATUS\:.*//g')
+             HTTP_STATUS=$(echo "${HTTP_RESPONSE}" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+             if [ ! ${HTTP_STATUS} -eq 200  ]; then
+               echo "Test status query error [HTTP status: ${HTTP_STATUS}]"
+               exit 249
+             fi
 
-serviceHost=https://api.apptest.ai
+             TEST_RUN_RESULT=$(echo "${HTTP_BODY}" | jq -r .complete)
+             if ${TEST_RUN_RESULT}; then
+               RESULT_DATA=$(echo "${HTTP_BODY}" | jq -r .data)
+               break
+             fi
 
-# store the whole response with the status at the and
-apk_file_d='apk_file=@'\"${binary_path}\" 
-data_d='data={"pid":'${project_id}',"test_set_name":"CircleCI"}'
-testRunUrl=${serviceHost}/test_set/queuing?access_key=${access_key}
+             current_time=$(date +%s)
+             wait_time=$((current_time - start_time))
+             echo "Waiting for Test Run(ID: ${tsid}) completed for ${wait_time}s"
+             sleep 30s
+          done
+          if ${waiting_for_test_results}; then
+             TEST_RESULT=$(echo ${RESULT_DATA} | jq -r .result_json |  jq -r \ '.testsuites.testsuite[0].testcase[]')
+             echo "+-----------------------------------------------------------------+"
+             echo "|                        Device                        |  Result  |"
+             echo "+-----------------------------------------------------------------+"
+             echo ${TEST_RESULT} | jq -r \
+                  'if has("system-out") then "\""+ .name + "\" \" Passed \"" else "\"" + .name + "\" \" Failed \" " end ' \
+                  | xargs printf "| %-52s | %b | \n"
+             echo "+-----------------------------------------------------------------+"
 
-#echo ${apk_file_d}
-#echo ${testRunUrl}
-#echo ${data_d}
-HTTP_RESPONSE=$(curl --silent --write-out "HTTPSTATUS:%{http_code}" -X POST -F $apk_file_d -F $data_d ${testRunUrl})
-#echo ${HTTP_RESPONSE}
-
-# extract the body
-HTTP_BODY=$(echo ${HTTP_RESPONSE} | sed -e 's/HTTPSTATUS\:.*//g')
-
-# extract the status
-HTTP_STATUS=$(echo ${HTTP_RESPONSE} | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-
-# HTTP Status Check
-if [ ! ${HTTP_STATUS} -eq 200  ]; then
-  echo_fail "Error [HTTP status: ${HTTP_STATUS}]"
-fi
-
-# apptest.ai Test Run Result Check
-create_test_result=$(echo $HTTP_BODY | jq -r .result)
-if [ $create_test_result == 'fail' ]; then
-  echo_fail "apptest.ai Test Run Fail : $(echo $HTTP_BODY | jq -r .reason)"
-fi
-
-
-#=============================================
-# Test Complete Check by polling
-#=============================================
-
-TEST_RUN_RESULT='false'
-
-# Get tsid from Test Run api's HTTP_BODY
-tsid=$(echo $HTTP_BODY | jq -r .data.tsid)
-echo 'Your test request is accepted - Test Run id : '$tsid
-
-# Get the Test Result Data
-# Refer to 1. API Spec
-testCompleteCheckUrl=${serviceHost}/test_set/${tsid}/ci_info?access_key=${access_key}
-
-while [ ! "$TEST_RUN_RESULT" == "true" ] && [ "$waiting_for_test_results" == "true" ]; do
-    HTTP_RESPONSE=$(curl --silent --write-out "HTTPSTATUS:%{http_code}" ${testCompleteCheckUrl})
-
-    # extract the body
-    HTTP_BODY=$(echo ${HTTP_RESPONSE} | sed -e 's/HTTPSTATUS\:.*//g')
-
-    # extract the status
-    HTTP_STATUS=$(echo ${HTTP_RESPONSE} | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-
-    # print the body
-    # echo "HTTP BODY : {$HTTP_BODY}"
-
-    # HTTP Status Check
-    if [ ! ${HTTP_STATUS} -eq 200  ]; then
-      echo_fail "Error [HTTP status: ${HTTP_STATUS}]"
-    fi
-
-    TEST_RUN_RESULT=$(echo $HTTP_BODY | jq -r .complete)
-
-    if [ "$TEST_RUN_RESULT" == "true" ]; then
-        RESULT_DATA=$(echo $HTTP_BODY | jq -r .data)
-        break
-    fi
-   
-    echo_details "Waiting for Test Run(Test run id : ${tsid}) completed"
-    sleep 20s
-done
-
-if [ "$waiting_for_test_results" == "true" ]; then 
-	echo '========================================='
-	echo $(echo $RESULT_DATA | jq -r .result_json)
-	echo $(echo $RESULT_DATA | jq -r .result_json > apptest_results.json)
-	echo_details "Test completed and saved (${APPTEST_AI_TEST_RESULT})"
-fi
+             if [ ! -d "${test_result_path}" ] ; then
+               mkdir "${test_result_path}" || echo "creating directory for test results failed"
+             fi
+             mkdir "${test_result_path}"/apptestai
+             test_result_xml_file_path="${test_result_path}"/apptestai/results.xml
+             test_result_html_file_path="${test_result_path}"/apptest-ai_result.html
+             echo $RESULT_DATA | jq -r .result_xml >  "${test_result_xml_file_path}"  && echo "Test result(JUnit XML) saved: ${test_result_xml_file_path} "
+             echo $RESULT_DATA | jq -r .result_html > "${test_result_html_file_path}" && echo "Test result(Full HTML) saved: ${test_result_html_file_path} "
+           fi
+           echo "apptest.ai test step completed!"
